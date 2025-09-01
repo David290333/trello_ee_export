@@ -94,7 +94,7 @@
     const cards=trello.cards||trello.data?.board?.cards||trello;
     const y=Number(yearEl.value), m=Number(monthEl.value);
 
-    // UTC hranice měsíce (abychom předešli posunům časových pásem u Trello ISO dat)
+    // UTC hranice měsíce
     const monthStart = new Date(Date.UTC(y, m-1, 1, 0,0,0,0));
     const monthEnd   = new Date(Date.UTC(y, m,   0, 23,59,59,999));
     // Cutoff pro Overdue: min(konec měsíce, dnešek)
@@ -102,31 +102,31 @@
     const todayEndUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23,59,59,999));
     const overdueCutoff = (todayEndUTC < monthEnd) ? todayEndUTC : monthEnd;
 
-    const acc={}; CATEGORY_ORDER.forEach(cat=>acc[cat]={completed:0,overdue:0,denomOpen:0});
+    // Pozn.: overdueNew = jen ty, které se staly overdue v daném měsíci; overdueTotal = všechny aktuálně overdue k cutoffu (použito pro %)
+    const acc={}; CATEGORY_ORDER.forEach(cat=>acc[cat]={completed:0,overdueNew:0,overdueTotal:0,denomOpen:0});
 
     const isArchived=c=>!!c.closed; const isTemplate=c=>!!c.isTemplate||/template/i.test(c.name||'');
     let processed=0;
 
-    const overdueDetails=[]; const completedDetails=[];
+    const overdueDetailsNew=[]; const completedDetails=[];
 
     for(const card of cards){
       if(!card) continue;
       if(isArchived(card)||isTemplate(card)||isHeaderCard(card)) continue;
 
       const listName=listsById[card.idList]?.name||'';
-      if(!listIsWorkflow(listName)) continue; // mimo workflow nebereme
+      if(!listIsWorkflow(listName)) continue;
 
-      // kategorie: PRIMÁRNĚ dle názvu listu (spolehlivější), pak štítky
+      // Kategorie: primárně název listu, pak štítek
       let cat = categoryFromListName(listName) || canonicalCategoryFromLabels(card);
       if(!cat) continue;
 
-      const inDone=listIsDone(listName);
-      const inOpen=listIsToDo(listName)||listIsInProgress(listName)||listIsOptimization(listName);
+      const inOpen = listIsToDo(listName)||listIsInProgress(listName)||listIsOptimization(listName);
       const due=parseDateSafe(card.due);
       const dueComplete=(card.dueComplete===true);
       const listClosed=!!(listsById[card.idList]&&listsById[card.idList].closed);
 
-      // --- Completed ---
+      // --- Completed v měsíci ---
       const doneInfo=getDoneAt(card.id); const doneAt=doneInfo.date; const doneListName=doneInfo.doneListName;
       if(doneAt && doneAt>=monthStart && doneAt<=monthEnd){
         const catForDone = categoryFromListName(doneListName) || canonicalCategoryFromLabels(card) || cat;
@@ -134,34 +134,44 @@
         completedDetails.push({category:catForDone, card:card.name||'', list:doneListName||'', doneAt: doneAt.toISOString().slice(0,19).replace('T',' ')});
       }
 
-      // --- Overdue (varianta B) ---
+      // --- Overdue TOTAL (pro %) ---
       if(due && !dueComplete && due<=overdueCutoff && inOpen && !listClosed){
-        acc[cat].overdue++; acc['ALL'].overdue++;
-        overdueDetails.push({category:cat, card:card.name||'', list:listName, due: due.toISOString().slice(0,10)});
+        acc[cat].overdueTotal++; acc['ALL'].overdueTotal++;
+      }
+
+      // --- Overdue NEW THIS MONTH (absolutní počet do tabulky) ---
+      if(due && !dueComplete && due>=monthStart && due<=overdueCutoff && inOpen && !listClosed){
+        acc[cat].overdueNew++; acc['ALL'].overdueNew++;
+        overdueDetailsNew.push({category:cat, card:card.name||'', list:listName, due: due.toISOString().slice(0,10)});
       }
 
       if(inOpen){ acc[cat].denomOpen++; acc['ALL'].denomOpen++; }
       processed++;
     }
 
-    const rows=CATEGORY_ORDER.map(cat=>{const c=acc[cat]; const pct=c.denomOpen>0?(c.overdue/c.denomOpen):0; return {Category:cat, 'Number of tickets Completed':c.completed, 'Number of tickets Overdue':c.overdue, '% Tickets overdue': +(pct.toFixed(4))};});
+    // řádky do tabulky: počet = overdueNew; % = overdueTotal/denomOpen
+    const rows=CATEGORY_ORDER.map(cat=>{
+      const c=acc[cat]; const pct=c.denomOpen>0?(c.overdueTotal/c.denomOpen):0;
+      return {Category:cat, 'Number of tickets Completed':c.completed, 'Number of tickets Overdue':c.overdueNew, '% Tickets overdue': +(pct.toFixed(4))};
+    });
 
-    renderPreview(rows,y,m,processed,overdueDetails,completedDetails);
+    renderPreview(rows,y,m,processed,overdueDetailsNew,completedDetails);
     exportExcel(rows,y,m);
   }
 
-  function renderPreview(rows,y,m,processed,overdueDetails,completedDetails){
+  function renderPreview(rows,y,m,processed,overdueDetailsNew,completedDetails){
     let html='<table><thead><tr><th>Category</th><th>Number of tickets Completed</th><th>Number of tickets Overdue</th><th>% Tickets overdue</th></tr></thead><tbody>';
     rows.forEach(r=>{html+=`<tr><td>${r.Category}</td><td>${r["Number of tickets Completed"]}</td><td>${r["Number of tickets Overdue"]}</td><td>${(r["% Tickets overdue"]*100).toFixed(1)} %</td></tr>`});
     html+='</tbody></table>';
 
-    // Debug sekce: přesný seznam karet
-    html += '<h3>Overdue – detail</h3>';
+    // Detail: nové overdue v daném měsíci
+    html += '<h3>Overdue (nově v tomto měsíci) – detail</h3>';
     html += '<table><thead><tr><th>Category</th><th>Card</th><th>List</th><th>Due</th></tr></thead><tbody>';
-    overdueDetails.forEach(o=>{ html += `<tr><td>${o.category}</td><td>${o.card}</td><td>${o.list}</td><td>${o.due}</td></tr>`; });
-    if(overdueDetails.length===0) html += '<tr><td colspan="4">(nic)</td></tr>';
+    overdueDetailsNew.forEach(o=>{ html += `<tr><td>${o.category}</td><td>${o.card}</td><td>${o.list}</td><td>${o.due}</td></tr>`; });
+    if(overdueDetailsNew.length===0) html += '<tr><td colspan="4">(nic)</td></tr>';
     html += '</tbody></table>';
 
+    // Completed – detail
     html += '<h3>Completed – detail</h3>';
     html += '<table><thead><tr><th>Category</th><th>Card</th><th>Done list</th><th>Done at</th></tr></thead><tbody>';
     completedDetails.forEach(o=>{ html += `<tr><td>${o.category}</td><td>${o.card}</td><td>${o.list}</td><td>${o.doneAt}</td></tr>`; });
