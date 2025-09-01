@@ -53,7 +53,9 @@
   const listIsToDo=name=>norm(name).includes('to do');
   const listIsInProgress=name=>norm(name).includes('in progress');
   const listIsOptimization=name=>norm(name).includes('optimization');
-  const listIsWorkflow=name=>listIsToDo(name)||listIsInProgress(name)||listIsOptimization(name)||listIsDone(name);
+  const listIsRecurring=name=>norm(name).includes('recurring');            // ← NOVÉ
+  const listIsWorkflow=name=>                                           // ← UPRAVENO
+    listIsToDo(name)||listIsInProgress(name)||listIsOptimization(name)||listIsRecurring(name)||listIsDone(name);
   const parseDateSafe=val=>{if(!val) return null; const d=new Date(val); return isNaN(d.getTime())?null:d};
   const inYearMonth=(d,y,m)=>!!d&&d.getUTCFullYear()===y&&(d.getUTCMonth()+1)===m;
   const canonicalCategoryFromLabels=card=>{if(!Array.isArray(card.labels)) return null; for(const lab of card.labels){const key=(lab.name||'').trim().toLowerCase(); if(CATEGORY_LABEL_MAP[key]) return CATEGORY_LABEL_MAP[key];} return null;};
@@ -121,7 +123,8 @@
       let cat = categoryFromListName(listName) || canonicalCategoryFromLabels(card);
       if(!cat) continue;
 
-      const inOpen = listIsToDo(listName)||listIsInProgress(listName)||listIsOptimization(listName);
+      const inOpen =                                                     // ← UPRAVENO
+        listIsToDo(listName)||listIsInProgress(listName)||listIsOptimization(listName)||listIsRecurring(listName);
       const due=parseDateSafe(card.due);
       const dueComplete=(card.dueComplete===true);
       const listClosed=!!(listsById[card.idList]&&listsById[card.idList].closed);
