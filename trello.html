@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trello Monthly Tickets Exporter</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body{font-family:Arial,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:20px}
+    .card{background:#111827;border-radius:12px;padding:20px;max-width:1000px;margin:0 auto}
+    h1{margin-top:0}
+    label{display:block;margin-bottom:6px;font-size:14px}
+    select,input[type=file]{width:100%;padding:8px;margin-bottom:12px;border-radius:8px;border:1px solid #333;background:#0b1220;color:#e5e7eb}
+    .btn{background:#22c55e;border:none;padding:10px 16px;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:20px}
+    th,td{border:1px solid #333;padding:8px;text-align:left}
+    th{background:#1f2937}
+    .subtle{color:#9fb0c6;margin-top:6px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Export Trello ticketů podle měsíce</h1>
+    <label>JSON export z Trella</label>
+    <input id="file" type="file" accept="application/json,.json">
+    <label>Měsíc</label>
+    <select id="month"></select>
+    <label>Rok</label>
+    <select id="year"></select>
+    <button id="run" class="btn" disabled>Start exportu</button>
+    <div id="boardName" class="subtle"></div>
+    <div id="meta" class="subtle"></div>
+    <div id="status" class="subtle"></div>
+    <div id="preview"></div>
+  </div>
+
+<script>
+(function(){
+  const MONTHS=[...Array(12)].map((_,i)=>String(i+1).padStart(2,'0'));
+  const CATEGORY_ORDER=["ALL","WEB","PPC","SOCIALS","ANALYTICS","MAILING","APPS/TECHNICAL PROJECTS"];
+  const CATEGORY_LABEL_MAP={"web":"WEB","ppc":"PPC","social media":"SOCIALS","socials":"SOCIALS","analytics":"ANALYTICS","mailing":"MAILING","apps":"APPS/TECHNICAL PROJECTS","apps/technical projects":"APPS/TECHNICAL PROJECTS","apps/technical project":"APPS/TECHNICAL PROJECTS"};
+
+  const fileEl=document.getElementById('file'); const runEl=document.getElementById('run'); const monthEl=document.getElementById('month'); const yearEl=document.getElementById('year'); const boardBadge=document.getElementById('boardName'); const metaBadge=document.getElementById('meta'); const statusEl=document.getElementById('status'); const previewEl=document.getElementById('preview');
+
+  MONTHS.forEach((m,i)=>{const o=document.createElement('option');o.value=i+1;o.textContent=m;monthEl.appendChild(o);});
+  const currentY=new Date().getFullYear(); for(let y=currentY-5;y<=currentY+5;y++){const o=document.createElement('option');o.value=y;o.textContent=y;yearEl.appendChild(o);} monthEl.value=(new Date().getMonth()+1); yearEl.value=currentY;
+
+  let trello=null; let listsById={}; let boardName='Trello Board'; let actionsByCard=new Map();
+
+  // ---------- Helpers ----------
+  const norm=s=>(s||'').toLowerCase();
+  const listIsDone=name=>norm(name).includes('done');
+  const listIsToDo=name=>norm(name).includes('to do');
+  const listIsInProgress=name=>norm(name).includes('in progress');
+  const listIsOptimization=name=>norm(name).includes('optimization');
+  const listIsWorkflow=name=>listIsToDo(name)||listIsInProgress(name)||listIsOptimization(name)||listIsDone(name);
+  const parseDateSafe=val=>{if(!val) return null; const d=new Date(val); return isNaN(d.getTime())?null:d};
+  const inYearMonth=(d,y,m)=>!!d&&d.getUTCFullYear()===y&&(d.getUTCMonth()+1)===m;
+  const canonicalCategoryFromLabels=card=>{if(!Array.isArray(card.labels)) return null; for(const lab of card.labels){const key=(lab.name||'').trim().toLowerCase(); if(CATEGORY_LABEL_MAP[key]) return CATEGORY_LABEL_MAP[key];} return null;};
+  const categoryFromListName=name=>{const s=(name||'').toLowerCase(); if(s.includes('web')) return 'WEB'; if(s.includes('ppc')) return 'PPC'; if(s.includes('social')) return 'SOCIALS'; if(s.includes('analytic')) return 'ANALYTICS'; if(s.includes('mail')) return 'MAILING'; if(s.includes('app')||s.includes('technical')) return 'APPS/TECHNICAL PROJECTS'; return null;};
+  const slugify=s=>(s||'report').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+  const isHeaderCard=c=>/^(tickets|tasks)\s+related\s+to/i.test(c.name||'');
+
+  function getDoneAt(cardId){
+    const arr=actionsByCard.get(cardId)||[]; let first=null,listName=null;
+    for(const a of arr){
+      if(a.type==='updateCard'&&a.data&&a.data.listAfter&&listIsDone(a.data.listAfter.name)){
+        const d=parseDateSafe(a.date); if(d&&(!first||d<first)){ first=d; listName=a.data.listAfter.name||null; }
+      }
+      if(a.type==='updateCard'&&a.data&&a.data.card&&a.data.card.dueComplete===true){
+        const d=parseDateSafe(a.date); if(d&&(!first||d<first)){ first=d; }
+      }
+    }
+    return {date:first,doneListName:listName};
+  }
+
+  // ---------- Load JSON ----------
+  fileEl.addEventListener('change',async e=>{
+    trello=null;listsById={};actionsByCard=new Map();boardName='Trello Board';previewEl.innerHTML='';statusEl.textContent='';
+    const file=e.target.files[0]; if(!file){runEl.disabled=true;metaBadge.textContent='Načteno 0 karet';boardBadge.textContent='Board: –';return;}
+    try{
+      const text=await file.text(); trello=JSON.parse(text);
+      const lists=trello.lists||trello.data?.board?.lists||[]; const actions=trello.actions||trello.data?.board?.actions||[]; const cards=trello.cards||trello.data?.board?.cards||trello;
+      boardName=trello.name||trello.data?.board?.name||boardName; boardBadge.textContent=`Board: ${boardName}`;
+      if(Array.isArray(lists)) lists.forEach(l=>listsById[l.id]={name:l.name||'',closed:!!l.closed});
+      if(Array.isArray(actions)) for(const a of actions){const id=a.data?.card?.id||a.data?.card?.idCard||a.data?.idCard; if(id){ if(!actionsByCard.has(id)) actionsByCard.set(id,[]); actionsByCard.get(id).push(a); }}
+      metaBadge.textContent=`Načteno ${Array.isArray(cards)?cards.length:0} karet, akcí: ${actionsByCard.size}`;
+      runEl.disabled=!Array.isArray(cards)||cards.length===0;
+    }catch(err){console.error(err);statusEl.textContent='Nepodařilo se načíst JSON.';runEl.disabled=true;}
+  });
+
+  // ---------- Report ----------
+  function buildReport(){
+    const cards=trello.cards||trello.data?.board?.cards||trello;
+    const y=Number(yearEl.value), m=Number(monthEl.value);
+
+    // UTC hranice měsíce (abychom předešli posunům časových pásem u Trello ISO dat)
+    const monthStart = new Date(Date.UTC(y, m-1, 1, 0,0,0,0));
+    const monthEnd   = new Date(Date.UTC(y, m,   0, 23,59,59,999));
+    // Cutoff pro Overdue: min(konec měsíce, dnešek)
+    const now = new Date();
+    const todayEndUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23,59,59,999));
+    const overdueCutoff = (todayEndUTC < monthEnd) ? todayEndUTC : monthEnd;
+
+    const acc={}; CATEGORY_ORDER.forEach(cat=>acc[cat]={completed:0,overdue:0,denomOpen:0});
+
+    const isArchived=c=>!!c.closed; const isTemplate=c=>!!c.isTemplate||/template/i.test(c.name||'');
+    let processed=0;
+
+    const overdueDetails=[]; const completedDetails=[];
+
+    for(const card of cards){
+      if(!card) continue;
+      if(isArchived(card)||isTemplate(card)||isHeaderCard(card)) continue;
+
+      const listName=listsById[card.idList]?.name||'';
+      if(!listIsWorkflow(listName)) continue; // mimo workflow nebereme
+
+      // kategorie: PRIMÁRNĚ dle názvu listu (spolehlivější), pak štítky
+      let cat = categoryFromListName(listName) || canonicalCategoryFromLabels(card);
+      if(!cat) continue;
+
+      const inDone=listIsDone(listName);
+      const inOpen=listIsToDo(listName)||listIsInProgress(listName)||listIsOptimization(listName);
+      const due=parseDateSafe(card.due);
+      const dueComplete=(card.dueComplete===true);
+      const listClosed=!!(listsById[card.idList]&&listsById[card.idList].closed);
+
+      // --- Completed ---
+      const doneInfo=getDoneAt(card.id); const doneAt=doneInfo.date; const doneListName=doneInfo.doneListName;
+      if(doneAt && doneAt>=monthStart && doneAt<=monthEnd){
+        const catForDone = categoryFromListName(doneListName) || canonicalCategoryFromLabels(card) || cat;
+        acc[catForDone].completed++; acc['ALL'].completed++;
+        completedDetails.push({category:catForDone, card:card.name||'', list:doneListName||'', doneAt: doneAt.toISOString().slice(0,19).replace('T',' ')});
+      }
+
+      // --- Overdue (varianta B) ---
+      if(due && !dueComplete && due<=overdueCutoff && inOpen && !listClosed){
+        acc[cat].overdue++; acc['ALL'].overdue++;
+        overdueDetails.push({category:cat, card:card.name||'', list:listName, due: due.toISOString().slice(0,10)});
+      }
+
+      if(inOpen){ acc[cat].denomOpen++; acc['ALL'].denomOpen++; }
+      processed++;
+    }
+
+    const rows=CATEGORY_ORDER.map(cat=>{const c=acc[cat]; const pct=c.denomOpen>0?(c.overdue/c.denomOpen):0; return {Category:cat, 'Number of tickets Completed':c.completed, 'Number of tickets Overdue':c.overdue, '% Tickets overdue': +(pct.toFixed(4))};});
+
+    renderPreview(rows,y,m,processed,overdueDetails,completedDetails);
+    exportExcel(rows,y,m);
+  }
+
+  function renderPreview(rows,y,m,processed,overdueDetails,completedDetails){
+    let html='<table><thead><tr><th>Category</th><th>Number of tickets Completed</th><th>Number of tickets Overdue</th><th>% Tickets overdue</th></tr></thead><tbody>';
+    rows.forEach(r=>{html+=`<tr><td>${r.Category}</td><td>${r["Number of tickets Completed"]}</td><td>${r["Number of tickets Overdue"]}</td><td>${(r["% Tickets overdue"]*100).toFixed(1)} %</td></tr>`});
+    html+='</tbody></table>';
+
+    // Debug sekce: přesný seznam karet
+    html += '<h3>Overdue – detail</h3>';
+    html += '<table><thead><tr><th>Category</th><th>Card</th><th>List</th><th>Due</th></tr></thead><tbody>';
+    overdueDetails.forEach(o=>{ html += `<tr><td>${o.category}</td><td>${o.card}</td><td>${o.list}</td><td>${o.due}</td></tr>`; });
+    if(overdueDetails.length===0) html += '<tr><td colspan="4">(nic)</td></tr>';
+    html += '</tbody></table>';
+
+    html += '<h3>Completed – detail</h3>';
+    html += '<table><thead><tr><th>Category</th><th>Card</th><th>Done list</th><th>Done at</th></tr></thead><tbody>';
+    completedDetails.forEach(o=>{ html += `<tr><td>${o.category}</td><td>${o.card}</td><td>${o.list}</td><td>${o.doneAt}</td></tr>`; });
+    if(completedDetails.length===0) html += '<tr><td colspan="4">(nic)</td></tr>';
+    html += '</tbody></table>';
+
+    previewEl.innerHTML=html; metaBadge.textContent=`Zpracováno ${processed} karet`; statusEl.textContent=`Připraven export pro ${String(m).padStart(2,'0')}/${y}`;
+  }
+
+  function exportExcel(rows,y,m){
+    const ws=XLSX.utils.json_to_sheet(rows,{header:["Category","Number of tickets Completed","Number of tickets Overdue","% Tickets overdue"]});
+    ws['!cols']=[{wch:28},{wch:28},{wch:28},{wch:22}];
+    const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Report');
+    XLSX.writeFile(wb,`report_${slugify(boardName)}_${y}-${String(m).padStart(2,'0')}.xlsx`);
+  }
+
+  runEl.addEventListener('click',()=>{if(!trello) return;try{buildReport();}catch(e){console.error(e);statusEl.textContent='Chyba při exportu.';}});
+})();
+</script>
+</body>
+</html>
