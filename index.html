@@ -76,6 +76,26 @@
     return {date:first,doneListName:listName};
   }
 
+  function becameOverdueInMonth(card, monthStart, monthEnd) {
+  const actions = actionsByCard.get(card.id) || [];
+  const dueHistory = [];
+
+  // projdeme všechny změny due
+  for (const a of actions) {
+    if (a.type === 'updateCard' && a.data?.old?.due && a.data?.card?.due) {
+      const oldDue = parseDateSafe(a.data.old.due);
+      const newDue = parseDateSafe(a.data.card.due);
+      const dateChanged = parseDateSafe(a.date);
+      if (oldDue && dateChanged && oldDue < dateChanged && dateChanged >= monthStart && dateChanged <= monthEnd) {
+        dueHistory.push({ oldDue, newDue, dateChanged });
+      }
+    }
+  }
+
+  // pokud existuje původní due, které spadá před změnu a do měsíce, bereme jako overdue
+  return dueHistory.length > 0;
+}
+
   // ---------- Load JSON ----------
   fileEl.addEventListener('change',async e=>{
     trello=null;listsById={};actionsByCard=new Map();boardName='Trello Board';previewEl.innerHTML='';statusEl.textContent='';
@@ -142,11 +162,23 @@
         acc[cat].overdueTotal++; acc['ALL'].overdueTotal++;
       }
 
-      // --- Overdue NEW THIS MONTH (absolutní počet do tabulky) ---
-      if(due && !dueComplete && due>=monthStart && due<=overdueCutoff && inOpen && !listClosed){
-        acc[cat].overdueNew++; acc['ALL'].overdueNew++;
-        overdueDetailsNew.push({category:cat, card:card.name||'', list:listName, due: due.toISOString().slice(0,10)});
-      }
+    // --- Overdue NEW THIS MONTH (nově nebo dočasně overdue během měsíce) ---
+    let becameOverdue = false;
+
+    // 1) Byl aktuální due v měsíci a už je po termínu
+    if (due && !dueComplete && due >= monthStart && due <= overdueCutoff && inOpen && !listClosed) {
+      becameOverdue = true;
+    }
+
+    // 2) Nebo měl dříve due, které během měsíce expirovalo, ale pak bylo posunuto (detekujeme z actions)
+    if (!becameOverdue && becameOverdueInMonth(card, monthStart, monthEnd)) {
+      becameOverdue = true;
+    }
+
+    if (becameOverdue) {
+      acc[cat].overdueNew++; acc['ALL'].overdueNew++;
+      overdueDetailsNew.push({category:cat, card:card.name||'', list:listName, due: due ? due.toISOString().slice(0,10) : '(moved due)'});
+    }
 
       if(inOpen){ acc[cat].denomOpen++; acc['ALL'].denomOpen++; }
       processed++;
