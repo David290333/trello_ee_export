@@ -59,6 +59,9 @@
   const parseDateSafe=val=>{if(!val) return null; const d=new Date(val); return isNaN(d.getTime())?null:d};
   const inYearMonth=(d,y,m)=>!!d&&d.getUTCFullYear()===y&&(d.getUTCMonth()+1)===m;
   const canonicalCategoryFromLabels=card=>{if(!Array.isArray(card.labels)) return null; for(const lab of card.labels){const key=(lab.name||'').trim().toLowerCase(); if(CATEGORY_LABEL_MAP[key]) return CATEGORY_LABEL_MAP[key];} return null;};
+  const hasWaitingForClientLabel = card =>
+  Array.isArray(card.labels) &&
+  card.labels.some(l => norm(l.name) === "waiting for client");
   const categoryFromListName=name=>{const s=(name||'').toLowerCase(); if(s.includes('web')) return 'WEB'; if(s.includes('ppc')) return 'PPC'; if(s.includes('social')) return 'SOCIALS'; if(s.includes('analytic')) return 'ANALYTICS'; if(s.includes('mail')) return 'MAILING'; if(s.includes('app')||s.includes('technical')) return 'APPS/TECHNICAL PROJECTS'; return null;};
   const slugify=s=>(s||'report').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
   const isHeaderCard=c=>/^(tickets|tasks)\s+related\s+to/i.test(c.name||'');
@@ -125,7 +128,13 @@
     const overdueCutoff = (todayEndUTC < monthEnd) ? todayEndUTC : monthEnd;
 
     // Pozn.: overdueNew = jen ty, které se staly overdue v daném měsíci; overdueTotal = všechny aktuálně overdue k cutoffu (použito pro %)
-    const acc={}; CATEGORY_ORDER.forEach(cat=>acc[cat]={completed:0,overdueNew:0,overdueTotal:0,denomOpen:0});
+    const acc={}; CATEGORY_ORDER.forEach(cat=>acc[cat]={
+      completed:0,
+      overdueNew:0,
+      overdueTotal:0,
+      denomOpen:0,
+      waitingForClient:0      // ← PŘIDÁNO
+    });
 
     const isArchived=c=>!!c.closed; const isTemplate=c=>!!c.isTemplate||/template/i.test(c.name||'');
     let processed=0;
@@ -180,14 +189,23 @@
       overdueDetailsNew.push({category:cat, card:card.name||'', list:listName, due: due ? due.toISOString().slice(0,10) : '(moved due)'});
     }
 
-      if(inOpen){ acc[cat].denomOpen++; acc['ALL'].denomOpen++; }
+      if (inOpen && hasWaitingForClientLabel(card)) {
+        acc[cat].waitingForClient++;
+        acc['ALL'].waitingForClient++;
+      }
       processed++;
     }
 
     // řádky do tabulky: počet = overdueNew; % = overdueTotal/denomOpen
     const rows=CATEGORY_ORDER.map(cat=>{
       const c=acc[cat]; const pct=c.denomOpen>0?(c.overdueTotal/c.denomOpen):0;
-      return {Category:cat, 'Number of tickets Completed':c.completed, 'Number of tickets Overdue':c.overdueNew, '% Tickets overdue': +(pct.toFixed(4))};
+      return {
+        Category:cat,
+        'Number of tickets Completed':c.completed,
+        'Number of tickets Overdue':c.overdueNew,
+        '% Tickets overdue': +(pct.toFixed(4)),
+        'Tickets Waiting For Client': c.waitingForClient      // ← NOVÝ SLOUPEC
+      };
     });
 
     renderPreview(rows,y,m,processed,overdueDetailsNew,completedDetails);
@@ -217,7 +235,15 @@
   }
 
   function exportExcel(rows,y,m){
-    const ws=XLSX.utils.json_to_sheet(rows,{header:["Category","Number of tickets Completed","Number of tickets Overdue","% Tickets overdue"]});
+    const ws = XLSX.utils.json_to_sheet(rows, {
+      header: [
+        "Category",
+        "Number of tickets Completed",
+        "Number of tickets Overdue",
+        "% Tickets overdue",
+        "Tickets Waiting For Client"        // ← NOVÝ SLOUPEC
+      ]
+    });
     ws['!cols']=[{wch:28},{wch:28},{wch:28},{wch:22}];
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Report');
     XLSX.writeFile(wb,`report_${slugify(boardName)}_${y}-${String(m).padStart(2,'0')}.xlsx`);
